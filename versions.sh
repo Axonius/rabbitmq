@@ -1,19 +1,35 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+declare -A alpineVersions=(
+	[3.9]='3.18'
+	[3.10]='3.18'
+	[3.11]='3.18'
+	[3.12]='3.18'
+)
+
+declare -A ubuntuVersions=(
+	[3.9]='22.04'
+	[3.10]='22.04'
+	[3.11]='22.04'
+	[3.12]='22.04'
+)
+
 # https://www.rabbitmq.com/which-erlang.html ("Maximum supported Erlang/OTP")
 declare -A otpMajors=(
 	[3.9]='25'
 	[3.10]='25'
 	[3.11]='25'
+	[3.12]='25'
 )
 
 # https://www.openssl.org/policies/releasestrat.html
 # https://www.openssl.org/source/
 declare -A opensslMajors=(
-	[3.9]='1.1'
-	[3.10]='1.1'
-	[3.11]='1.1'
+	[3.9]='3.1'
+	[3.10]='3.1'
+	[3.11]='3.1'
+	[3.12]='3.1'
 )
 
 cd "$(dirname "$(readlink -f "$BASH_SOURCE")")"
@@ -128,7 +144,13 @@ for version in "${versions[@]}"; do
 	# OpenSSL 3.0.5's sha256 file starts with a single space 😬
 	opensslSourceSha256="${opensslSourceSha256# }"
 
-	echo "$version: $fullVersion (otp $otpVersion, openssl $opensslVersion)"
+	alpineVersion="${alpineVersions[$rcVersion]}"
+	export alpineVersion
+
+	ubuntuVersion="${ubuntuVersions[$rcVersion]}"
+	export ubuntuVersion
+
+	echo "$version: $fullVersion (otp $otpVersion, openssl $opensslVersion, alpine, $alpineVersion, ubuntu $ubuntuVersion)"
 
 	json="$(
 		jq <<<"$json" -c '
@@ -141,6 +163,12 @@ for version in "${versions[@]}"; do
 				otp: {
 					version: env.otpVersion,
 					sha256: env.otpSourceSha256,
+				},
+				alpine: {
+					version: env.alpineVersion
+				},
+				ubuntu: {
+					version: env.ubuntuVersion
 				},
 			}
 		'

@@ -32,9 +32,12 @@ generated_warning() {
 for version; do
 	export version
 
-	if jq -e '.[env.version] | not' versions.json > /dev/null; then
-		echo "deleting $version ..."
+	if [ -d "$version" ]; then
 		rm -rf "$version"
+	fi
+
+	if jq -e '.[env.version] | not' versions.json > /dev/null; then
+		echo "skipping $version ..."
 		continue
 	fi
 
@@ -43,18 +46,22 @@ for version; do
 
 		echo "processing $version/$variant ..."
 
+		mkdir -p "$version/$variant"
+
 		{
 			generated_warning
 			gawk -f "$jqt" "Dockerfile-$variant.template"
 		} > "$version/$variant/Dockerfile"
 
-		cp -a 10-defaults.conf docker-entrypoint.sh "$version/$variant/"
+		cp -f docker-entrypoint.sh conf.d/*.conf "$version/$variant/"
 
 		if [ "$variant" = 'alpine' ]; then
 			sed -i -e 's/gosu/su-exec/g' "$version/$variant/docker-entrypoint.sh"
 		fi
 
 		echo "processing $version/$variant/management ..."
+
+		mkdir -p "$version/$variant/management"
 
 		{
 			generated_warning

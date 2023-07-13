@@ -6,19 +6,18 @@
 
 # The official Canonical Ubuntu Focal image is ideal from a security perspective,
 # especially for the enterprises that we, the RabbitMQ team, have to deal with
-FROM ubuntu:20.04
+FROM ubuntu:22.04 as build-base
 
 RUN set -eux; \
 	apt-get update; \
 	apt-get install -y --no-install-recommends \
-# grab gosu for easy step-down from root
-		gosu \
-# Bring in tzdata so users could set the timezones through the environment
-		tzdata \
-	; \
-	rm -rf /var/lib/apt/lists/*; \
-# verify that the "gosu" binary works
-	gosu nobody true
+		build-essential \
+		ca-certificates \
+		gnupg \
+		libncurses5-dev \
+		wget
+
+FROM build-base as openssl-builder
 
 # Default to a PGP keyserver that pgp-happy-eyeballs recognizes, but allow for substitutions locally
 ARG PGP_KEYSERVER=keyserver.ubuntu.com
@@ -26,39 +25,22 @@ ARG PGP_KEYSERVER=keyserver.ubuntu.com
 # run the build with a different PGP_KEYSERVER, e.g. docker build --tag rabbitmq:3.9 --build-arg PGP_KEYSERVER=pgpkeys.eu 3.9/ubuntu
 # For context, see https://github.com/docker-library/official-images/issues/4252
 
-ENV OPENSSL_VERSION 1.1.1s
-ENV OPENSSL_SOURCE_SHA256="c5ac01e760ee6ff0dab61d6b2bbd30146724d063eb322180c6f18a6f74e4b6aa"
+ENV OPENSSL_VERSION 3.1.1
+ENV OPENSSL_SOURCE_SHA256="b3aa61334233b852b63ddb048df181177c2c659eb9d4376008118f9c08d07674"
 # https://www.openssl.org/community/otc.html
 ENV OPENSSL_PGP_KEY_IDS="0x8657ABB260F056B1E5190839D9C4D26D0E604491 0xB7C1C14360F353A36862E4D5231C84CDDCC69C45 0xC1F33DD8CE1D4CC613AF14DA9195C48241FBF7DD 0x95A9908DDFA16830BE9FB9003D30A3A9FF1360DC 0x7953AC1FBC3DC8B3B292393ED5E9E43F7DF9EE8C 0xA21FAB74B0088AA361152586B8EF1A6BA9DA2D5C 0xE5E52560DD91C556DDBDA5D02064C53641C25E5D"
 
-ENV OTP_VERSION 25.1.2
+ENV OTP_VERSION 25.3.2.3
 # TODO add PGP checking when the feature will be added to Erlang/OTP's build system
 # https://erlang.org/pipermail/erlang-questions/2019-January/097067.html
-ENV OTP_SOURCE_SHA256="5442dea694e7555d479d80bc81f1428020639c258f8e40b2052732d1cc95cca5"
+ENV OTP_SOURCE_SHA256="8c1e8811201d1e9cc806b74393db16e89a119f412e16bb5f6181d54cd102eb4f"
 
 # Install dependencies required to build Erlang/OTP from source
 # https://erlang.org/doc/installation_guide/INSTALL.html
-# autoconf: Required to configure Erlang/OTP before compiling
 # dpkg-dev: Required to set up host & build type when compiling Erlang/OTP
 # gnupg: Required to verify OpenSSL artefacts
 # libncurses5-dev: Required for Erlang/OTP new shell & observer_cli - https://github.com/zhongwencool/observer_cli
 RUN set -eux; \
-	\
-	savedAptMark="$(apt-mark showmanual)"; \
-	apt-get update; \
-	apt-get install --yes --no-install-recommends \
-		autoconf \
-		ca-certificates \
-		dpkg-dev \
-		gcc \
-		g++ \
-		gnupg \
-		libncurses5-dev \
-		make \
-		wget \
-	; \
-	rm -rf /var/lib/apt/lists/*; \
-	\
 	OPENSSL_SOURCE_URL="https://www.openssl.org/source/openssl-$OPENSSL_VERSION.tar.gz"; \
 	OPENSSL_PATH="/usr/local/src/openssl-$OPENSSL_VERSION"; \
 	OPENSSL_CONFIG_DIR=/usr/local/etc/ssl; \
@@ -87,23 +69,26 @@ RUN set -eux; \
 	SYSTEM='Linux' \
 	BUILD='???' \
 	./config \
+		enable-fips \
 		--openssldir="$OPENSSL_CONFIG_DIR" \
-		--libdir="lib/$debMultiarch" \
-# add -rpath to avoid conflicts between our OpenSSL's "libssl.so" and the libssl package by making sure /usr/local/lib is searched first (but only for Erlang/OpenSSL to avoid issues with other tools using libssl; https://github.com/docker-library/rabbitmq/issues/364)
-		-Wl,-rpath=/usr/local/lib \
+		--libdir="/usr/local/lib/$debMultiarch" \
+# add -rpath to avoid conflicts between our OpenSSL's "libssl.so" and the libssl package by making sure /usr/local/lib/$debMultiarch is searched first (but only for Erlang/OpenSSL to avoid issues with other tools using libssl; https://github.com/docker-library/rabbitmq/issues/364)
+		-Wl,-rpath="/usr/local/lib/$debMultiarch" \
 	; \
 # Compile, install OpenSSL, verify that the command-line works & development headers are present
 	make -j "$(getconf _NPROCESSORS_ONLN)"; \
-	make install_sw install_ssldirs; \
-	cd ..; \
-	rm -rf "$OPENSSL_PATH"*; \
+	make install_sw install_ssldirs install_fips; \
 	ldconfig; \
 # use Debian's CA certificates
 	rmdir "$OPENSSL_CONFIG_DIR/certs" "$OPENSSL_CONFIG_DIR/private"; \
-	ln -sf /etc/ssl/certs /etc/ssl/private "$OPENSSL_CONFIG_DIR"; \
+	ln -sf /etc/ssl/certs /etc/ssl/private "$OPENSSL_CONFIG_DIR"
+
 # smoke test
-	openssl version; \
-	\
+RUN openssl version
+
+FROM openssl-builder as erlang-builder
+
+RUN set -eux; \
 	OTP_SOURCE_URL="https://github.com/erlang/otp/releases/download/OTP-$OTP_VERSION/otp_src_$OTP_VERSION.tar.gz"; \
 	OTP_PATH="/usr/local/src/otp-$OTP_VERSION"; \
 	\
@@ -118,17 +103,16 @@ RUN set -eux; \
 # ERL_TOP is required for Erlang/OTP makefiles to find the absolute path for the installation
 	cd "$OTP_PATH"; \
 	export ERL_TOP="$OTP_PATH"; \
-	./otp_build autoconf; \
 	CFLAGS="$(dpkg-buildflags --get CFLAGS)"; export CFLAGS; \
-# add -rpath to avoid conflicts between our OpenSSL's "libssl.so" and the libssl package by making sure /usr/local/lib is searched first (but only for Erlang/OpenSSL to avoid issues with other tools using libssl; https://github.com/docker-library/rabbitmq/issues/364)
-	export CFLAGS="$CFLAGS -Wl,-rpath=/usr/local/lib"; \
+# add -rpath to avoid conflicts between our OpenSSL's "libssl.so" and the libssl package by making sure /usr/local/lib/$debMultiarch is searched first (but only for Erlang/OpenSSL to avoid issues with other tools using libssl; https://github.com/docker-library/rabbitmq/issues/364)
+	export CFLAGS="$CFLAGS -Wl,-rpath=/usr/local/lib/$(dpkg-architecture --query DEB_HOST_MULTIARCH)"; \
 	hostArch="$(dpkg-architecture --query DEB_HOST_GNU_TYPE)"; \
 	buildArch="$(dpkg-architecture --query DEB_BUILD_GNU_TYPE)"; \
 	dpkgArch="$(dpkg --print-architecture)"; dpkgArch="${dpkgArch##*-}"; \
-# JIT is only supported on amd64 (until 24.x+1, where it will support arm64 as well); https://github.com/erlang/otp/blob/OTP-24.0.5/erts/configure#L21694-L21709 / https://github.com/erlang/otp/pull/4869
+# JIT is only supported on amd64 + arm64; https://github.com/erlang/otp/blob/OTP-25.3.2.2/erts/configure#L24306-L24347
 	jitFlag=; \
 	case "$dpkgArch" in \
-		amd64) jitFlag='--enable-jit' ;; \
+		amd64 | arm64) jitFlag='--enable-jit' ;; \
 	esac; \
 	./configure \
 		--host="$hostArch" \
@@ -140,7 +124,7 @@ RUN set -eux; \
 		--enable-clock-gettime \
 		--enable-hybrid-heap \
 		--enable-kernel-poll \
-		--enable-shared-zlib \
+		--enable-builtin-zlib \
 		--enable-smp-support \
 		--enable-threads \
 		--with-microstate-accounting=extra \
@@ -164,46 +148,52 @@ RUN set -eux; \
 		--without-wx \
 		$jitFlag \
 	; \
+	\
 # Compile & install Erlang/OTP
 	make -j "$(getconf _NPROCESSORS_ONLN)" GEN_OPT_FLGS="-O2 -fno-strict-aliasing"; \
 	make install; \
-	cd ..; \
-	rm -rf \
-		"$OTP_PATH"* \
-		/usr/local/lib/erlang/lib/*/examples \
-		/usr/local/lib/erlang/lib/*/src \
-	; \
 	\
-# reset apt-mark's "manual" list so that "purge --auto-remove" will remove all build dependencies
-	apt-mark auto '.*' > /dev/null; \
-	[ -z "$savedAptMark" ] || apt-mark manual $savedAptMark; \
-	find /usr/local -type f -executable -exec ldd '{}' ';' \
-		| awk '/=>/ { print $(NF-1) }' \
-		| sort -u \
-		| xargs -r dpkg-query --search \
-		| cut -d: -f1 \
-		| sort -u \
-		| xargs -r apt-mark manual \
-	; \
-	apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
-	\
-# Check that OpenSSL still works after purging build dependencies
-	openssl version; \
+# Remove unnecessary files
+	find /usr/local/lib/erlang -type d -name examples -exec rm -rf '{}' +; \
+	find /usr/local/lib/erlang -type d -name src -exec rm -rf '{}' +; \
+	find /usr/local/lib/erlang -type d -name include -exec rm -rf '{}' +
+
 # Check that Erlang/OTP crypto & ssl were compiled against OpenSSL correctly
-	erl -noshell -eval 'io:format("~p~n~n~p~n~n", [crypto:supports(), ssl:versions()]), init:stop().'
+RUN erl -noshell -eval 'ok = crypto:start(), ok = io:format("~p~n~n~p~n~n", [crypto:supports(), ssl:versions()]), init:stop().'
+
+FROM ubuntu:22.04
+
+COPY --from=erlang-builder /usr/local/bin/ /usr/local/bin/
+COPY --from=erlang-builder /usr/local/etc/ssl/ /usr/local/etc/ssl/
+COPY --from=erlang-builder /usr/local/lib/ /usr/local/lib/
 
 ENV RABBITMQ_DATA_DIR=/var/lib/rabbitmq
-# Create rabbitmq system user & group, fix permissions & allow root user to connect to the RabbitMQ Erlang VM
+
 RUN set -eux; \
+# Configure OpenSSL to use system certs
+	ln -vsf /etc/ssl/certs /etc/ssl/private /usr/local/etc/ssl; \
+	\
+# Check that OpenSSL still works after copying from previous builder
+	ldconfig; \
+	sed -i.ORIG -e '/\.include.*fips/s/.*/.include \/usr\/local\/etc\/ssl\/fipsmodule.cnf/' \
+	    -e '/# fips =/s/.*/fips = fips_sect/' /usr/local/etc/ssl/openssl.cnf; \
+	sed -i.ORIG -e '/^activate/s/^/#/' /usr/local/etc/ssl/fipsmodule.cnf; \
+	openssl version; \
+	openssl version -d; \
+	\
+# Check that Erlang/OTP crypto & ssl were compiled against OpenSSL correctly
+	erl -noshell -eval 'ok = crypto:start(), ok = io:format("~p~n~n~p~n~n", [crypto:supports(), ssl:versions()]), init:stop().'; \
+	\
+# Create rabbitmq system user & group, fix permissions & allow root user to connect to the RabbitMQ Erlang VM
 	groupadd --gid 999 --system rabbitmq; \
 	useradd --uid 999 --system --home-dir "$RABBITMQ_DATA_DIR" --gid rabbitmq rabbitmq; \
 	mkdir -p "$RABBITMQ_DATA_DIR" /etc/rabbitmq /etc/rabbitmq/conf.d /tmp/rabbitmq-ssl /var/log/rabbitmq; \
 	chown -fR rabbitmq:rabbitmq "$RABBITMQ_DATA_DIR" /etc/rabbitmq /etc/rabbitmq/conf.d /tmp/rabbitmq-ssl /var/log/rabbitmq; \
-	chmod 777 "$RABBITMQ_DATA_DIR" /etc/rabbitmq /etc/rabbitmq/conf.d /tmp/rabbitmq-ssl /var/log/rabbitmq; \
+	chmod 1777 "$RABBITMQ_DATA_DIR" /etc/rabbitmq /etc/rabbitmq/conf.d /tmp/rabbitmq-ssl /var/log/rabbitmq; \
 	ln -sf "$RABBITMQ_DATA_DIR/.erlang.cookie" /root/.erlang.cookie
 
 # Use the latest stable RabbitMQ release (https://www.rabbitmq.com/download.html)
-ENV RABBITMQ_VERSION 3.9.26
+ENV RABBITMQ_VERSION 3.9.29
 # https://www.rabbitmq.com/signatures.html#importing-gpg
 ENV RABBITMQ_PGP_KEY_ID="0x0A9AF2115F4687BD29803A206B73A36E6026DFCA"
 ENV RABBITMQ_HOME=/opt/rabbitmq
@@ -213,11 +203,20 @@ ENV PATH=$RABBITMQ_HOME/sbin:$PATH
 
 # Install RabbitMQ
 RUN set -eux; \
-	\
-	savedAptMark="$(apt-mark showmanual)"; \
+	export DEBIAN_FRONTEND=noninteractive; \
 	apt-get update; \
 	apt-get install --yes --no-install-recommends \
 		ca-certificates \
+# grab gosu for easy step-down from root
+		gosu \
+# Bring in tzdata so users could set the timezones through the environment
+		tzdata \
+	; \
+# verify that the "gosu" binary works
+	gosu nobody true; \
+	\
+	savedAptMark="$(apt-mark showmanual)"; \
+	apt-get install --yes --no-install-recommends \
 		gnupg \
 		wget \
 		xz-utils \
@@ -260,10 +259,7 @@ RUN set -eux; \
 	rm "$RABBITMQ_DATA_DIR/.erlang.cookie"
 
 # Enable Prometheus-style metrics by default (https://github.com/docker-library/rabbitmq/issues/419)
-RUN set -eux; \
-	gosu rabbitmq rabbitmq-plugins enable --offline rabbitmq_prometheus; \
-	echo 'management_agent.disable_metrics_collector = true' > /etc/rabbitmq/conf.d/management_agent.disable_metrics_collector.conf; \
-	chown rabbitmq:rabbitmq /etc/rabbitmq/conf.d/management_agent.disable_metrics_collector.conf
+RUN gosu rabbitmq rabbitmq-plugins enable --offline rabbitmq_prometheus
 
 # Added for backwards compatibility - users can simply COPY custom plugins to /plugins
 RUN ln -sf /opt/rabbitmq/plugins /plugins
@@ -278,7 +274,7 @@ VOLUME $RABBITMQ_DATA_DIR
 # https://docs.docker.com/samples/library/ubuntu/#locales
 ENV LANG=C.UTF-8 LANGUAGE=C.UTF-8 LC_ALL=C.UTF-8
 
-COPY --chown=rabbitmq:rabbitmq 10-defaults.conf /etc/rabbitmq/conf.d/
+COPY --chown=rabbitmq:rabbitmq 10-defaults.conf 20-management_agent.disable_metrics_collector.conf /etc/rabbitmq/conf.d/
 COPY docker-entrypoint.sh /usr/local/bin/
 ENTRYPOINT ["docker-entrypoint.sh"]
 

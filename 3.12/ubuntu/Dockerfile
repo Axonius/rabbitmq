@@ -22,7 +22,7 @@ FROM build-base as openssl-builder
 # Default to a PGP keyserver that pgp-happy-eyeballs recognizes, but allow for substitutions locally
 ARG PGP_KEYSERVER=keyserver.ubuntu.com
 # If you are building this image locally and are getting `gpg: keyserver receive failed: No data` errors,
-# run the build with a different PGP_KEYSERVER, e.g. docker build --tag rabbitmq:3.10 --build-arg PGP_KEYSERVER=pgpkeys.eu 3.10/ubuntu
+# run the build with a different PGP_KEYSERVER, e.g. docker build --tag rabbitmq:3.12 --build-arg PGP_KEYSERVER=pgpkeys.eu 3.12/ubuntu
 # For context, see https://github.com/docker-library/official-images/issues/4252
 
 ENV OPENSSL_VERSION 3.1.1
@@ -193,7 +193,7 @@ RUN set -eux; \
 	ln -sf "$RABBITMQ_DATA_DIR/.erlang.cookie" /root/.erlang.cookie
 
 # Use the latest stable RabbitMQ release (https://www.rabbitmq.com/download.html)
-ENV RABBITMQ_VERSION 3.10.24
+ENV RABBITMQ_VERSION 3.12.1
 # https://www.rabbitmq.com/signatures.html#importing-gpg
 ENV RABBITMQ_PGP_KEY_ID="0x0A9AF2115F4687BD29803A206B73A36E6026DFCA"
 ENV RABBITMQ_HOME=/opt/rabbitmq
